@@ -1,0 +1,245 @@
+#!pip install openai
+#!pip install panel
+
+import os
+from openai import AzureOpenAI
+
+from dotenv import dotenv_values
+from azure.identity import DefaultAzureCredential
+import os
+import streamlit as st
+import pandas as pd  
+env_name = "cosmos.env"
+config = dotenv_values(env_name)
+
+cosmosdb_endpoint = config['cosmos_db_api_endpoint']
+cosmosdb_key = config['cosmos_db_api_key']
+cosmosdb_connection_str = config['cosmos_db_connection_string']
+
+
+model = AzureOpenAI(
+azure_endpoint=config['openai_api_endpoint'],
+api_version="2023-03-15-preview",
+azure_deployment="conv_ai-dm",
+api_key=config['openai_api_key'] if len(config['openai_api_key']) > 0 else None,
+)
+
+
+context = [ {'role':'system', 'content':"""
+you are a bot to assist in create SQL commands that can do what the user request. \
+Your Database is composed by a SQL database with some tables. \
+Try to Maintain the SQL order simple.
+Put the SQL command in white letters with a black background, and just after \
+a simple and concise text explaining how it works.
+If the user ask for something that can not be solved with an SQL Order \
+just answer something nice and simple, maximum 10 words, asking him for something that \
+can be solved with SQL. \
+"""} ]
+
+
+context.append({ 'role': 'system', 'content': """
+first table:{
+"tableName": "c",
+"fields": [
+{
+"name": "c.caseStatus",
+"type" : "string"
+},
+{
+"name": "c.assignedUserName",
+"type": "string"
+},
+{
+"name": "c.sla",
+"type": "int"
+},
+{
+"name": "c.org",
+"type": "string"
+},
+{
+"name": "c.caseInventory",
+"type": "string"
+},
+{
+"name": "c.reviewRecommendation",
+"type": "int"
+},
+{
+"name": "c.contacts.createdAt",
+"type": "string"
+},
+{
+"name": "c.pgRisk",
+"type": "int"
+},
+]
+}
+"""
+})
+
+
+#SHOT SAMPLES
+context.append( {'role':'system', 'content':"""
+ -- Maintain the SQL order simple and efficient as you can, using valid SQL Lite, answer the following questions for the table provided above.
+ Question: Top 10 CLOSED cases
+SELECT TOP 10 * FROM c WHERE c.caseStatus='CLOSED'
+ Question: Top 10 cases assigned to anjali which are in progress.
+                 
+SELECT TOP 10 * FROM c WHERE c.assignedUserName LIKE '%Anjali%' and c.caseStatus='INPROG'
+ Question: Top 10 cases assigned to anjali and org is ccm.
+                 
+SELECT TOP 10 * FROM c WHERE c.assignedUserName LIKE '%Anjali%' and c.org='CCM'
+ Question: cases which were assigned after 19 july 2024.
+SELECT * FROM c where c.assignedDate > "2024-01-19T19:12:21.646Z"
+
+Question: Top 10 closed cases where sla is 7 days order by sla
+SELECT TOP 10 * FROM c where c.sla = 7 order by c.sla
+"""
+})
+
+# Function to generate SQL for given User Prompt.
+def return_CCRMSQL(user_message, context):
+
+    newcontext = context.copy()
+    newcontext.append({'role':'user', 'content':"question: " + user_message})
+
+    response = model.chat.completions.create(
+            model="gpt-35-turbo",
+            messages=newcontext,
+            temperature=0
+        )
+    # print(response.choices[0].message.content.partition(";")[0])
+    return (response.choices[0].message.content.partition(";")[0])
+
+
+
+
+import json
+from azure.cosmos import exceptions, CosmosClient, PartitionKey
+# Function to retrive claims from Cosmos DB for given query.
+def RetrieveClaimsFromCosmos(caseQuery):
+
+    # Initialize the Cosmos client
+    cosmoClient = CosmosClient(cosmosdb_endpoint, cosmosdb_key)
+
+    # Fetch the Database and Container
+    database_name = 'testdb'
+    container_name = 'testctr'
+    database = cosmoClient.get_database_client(database_name)
+    container = database.get_container_client(container_name)
+
+    # Query these items in SQL
+    query = caseQuery
+    try:
+        items = list(container.query_items(
+            query=query,
+            enable_cross_partition_query=True
+        ))
+
+        return items
+    except Exception as e:
+        print('Cosmos Exception', e)
+    
+# Function to get prompt based on user's input.
+def getSQLfromUserPrompt(prompt):
+               
+    context_user = context.copy()
+    query_gpt = return_CCRMSQL(prompt, context_user)
+
+    try:
+        return query_gpt
+
+    except Exception as e:
+        print('Prompt Exception', e)
+    
+# context_user = context.copy()
+# query_gpt = return_CCRMSQL("Give me the cases which where org is CCM and sla is 7", context_user)
+# print(query_gpt)
+
+# cases = RetrieveClaimsFromCosmos(query_gpt)
+
+
+# Load data from Cosmos DB
+# data = []
+# for item in cases:
+#     data.append(item)
+    
+    
+# print(data)
+
+def main():      
+    # error_prompt = "Sorry, I didn't understand your question"
+    error_unhadled = "Sorry, there is something wrong with the query. Please try again."
+
+    error_prompt = "Sorry"
+    
+    user_instruction = "Please provide a question or request related to the inventory management"
+
+    no_record_response = "Oops! It seems there are no records matching your search. Please refine your search query."
+
+    invalid_prompt = "Sorry, I didn't understand your question. Can you please provide more details or ask a specific question related to the inventory?"
+
+    # Set up Streamlit configuration and headers. 
+    # st.title('This is a title')
+    st.set_page_config("Query Helper", page_icon=":bird:", layout="wide")    
+    st.markdown("<h1 style='text-align: center; color: white;'>Query generator  :bird:</h1>", unsafe_allow_html=True)  
+    st.title('Inventory Management')
+    # st.markdown("*Streamlit* is **really** ***cool***.")
+  
+    # Set up Streamlit sidebar for chat input.    
+    st.sidebar.header("Chat Input")    
+    user_input=st.sidebar.text_area("User query", height=100)
+    print('user Prompt', user_input)
+
+    try:
+        
+        ai_prompt = getSQLfromUserPrompt(user_input)
+        print('AI Generated Prompt', ai_prompt)
+        # user_input=st.sidebar.text_input("User query")    
+        print('condition is',(user_input and error_prompt not in ai_prompt))
+        st.sidebar.write(user_instruction)
+        if user_input and error_prompt.lower() not in ai_prompt.lower():
+        # if user_input:
+            st.sidebar.write("Generating query and results...")
+            with st.spinner('Loading...'):  # Start the loading spinner  
+                cases = RetrieveClaimsFromCosmos(ai_prompt)
+                data = []
+                for item in cases:
+                    data.append(item)
+
+                df = pd.DataFrame(data) 
+                # result = get_prompt(db_chain, user_input, history_queue, knowledge_base_queries, knowledge_base_columns)    
+                generated_query = ''    
+                if cases: 
+                    # st.success('')
+                    total_record_message = f"Total No of Records: {len(data)}" 
+                    st.markdown(f"<p style='text-align:right; right:0 top:35px; font-family:arial'>{total_record_message}</p>", unsafe_allow_html=True)  
+                    # st.write("Total No of Records", len(data))
+                    st.dataframe(df)
+                    st.title('Generated Query')
+                    st.write(ai_prompt)
+                else:
+                    st.error(no_record_response)
+                    st.title('Generated Query')
+                    st.write(ai_prompt)
+                    
+        else:
+            if user_input:
+                st.warning(invalid_prompt)
+    
+    except Exception as e:
+        st.write(error_unhadled)
+
+           
+           
+if __name__=='__main__':
+     main()
+
+
+
+
+
+
+
+##### Document conversation
